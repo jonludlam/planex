@@ -10,11 +10,14 @@ import shutil
 
 import demjson
 
+# Nb. This is deprecated since 2.5
+import md5
+
 SRPMS_DIR = "./SRPMS/"
 RPMS_DIR = "RPMS"
 BUILD_DIR = "BUILD"
 TMP_RPM_PATH = "/tmp/RPMS"
-
+CACHE_DIR = "/rpmcache"
 
 class RpmError(Exception):
     pass
@@ -97,6 +100,9 @@ def get_srpm_info(srpm):
             alldeps)
         j['deps'] = realdeps
         j['arch'] = arch
+        content_file = open(myspecfile,'r')
+        j['spec'] = content_file.read()
+        content_file.close()
         return j
     except:
         return {'broken': True, 'srcrpm': srpm}
@@ -119,14 +125,14 @@ def get_package_to_srpm_map(srpm_info):
     return m
 
 
-def get_deps(srpm_info):
-    p_to_s_map = get_package_to_srpm_map(srpm_info)
+def get_deps(srpm_infos):
+    p_to_s_map = get_package_to_srpm_map(srpm_infos)
     deps = {}
-    for srpm in srpm_info:
-        deps[srpm['srcrpm']] = set()
-        for dep in srpm['deps']:
+    for srpm_info in srpm_infos:
+        deps[srpm_info['srcrpm']] = set()
+        for dep in srpm_info['deps']:
             if dep in p_to_s_map:
-                deps[srpm['srcrpm']].add(p_to_s_map[dep])
+                deps[srpm_info['srcrpm']].add(p_to_s_map[dep])
     return deps
 
 
@@ -163,6 +169,60 @@ def write_rpmmacros():
     f.write('%%_topdir %s\n' % os.getcwd())
     f.close()
 
+def find_pkg(srpm_infos, srpm):
+    for srpm_info in srpm_infos:
+        if srpm_info["srcrpm"] == srpm:
+            return srpm_info
+
+def get_pkg_ddeps(deps, srpm):
+    if srpm in deps:
+        ddeps = []
+        for dep in deps[srpm]:
+            ddeps.append(dep)
+            for ddep in get_pkg_ddeps(deps, dep):
+                ddeps.append(ddep)
+        return ddeps
+    else:
+        return []
+
+def get_srpm_hash(srpm_infos, external, deps, srpm):
+    allpkgs = get_pkg_ddeps(deps, srpm)
+    allpkgs.append(srpm)
+    allpkgs.sort()
+    m=md5.new()
+    for mypkg in allpkgs:
+        srpm_info = find_pkg(srpm_infos, mypkg)
+        m.update(srpm_info['spec'])
+    m.update(external)
+    return m.hexdigest()
+
+def get_cache_dir(srpm_infos, external, deps, srpm):
+    myhash = get_srpm_hash(srpm_infos, external, deps, srpm)
+    dst_dir = os.path.join(CACHE_DIR, myhash)
+    return dst_dir
+
+def need_to_build(srpm_infos, external, deps, srpm):
+    dst_dir = get_cache_dir(srpm_infos, external, deps, srpm)
+    return (not os.path.exists(dst_dir))
+
+def get_new_number(srpm,cache_dir):
+    latest_path = os.path.join(CACHE_DIR, srpm, "latest")
+    if os.path.exists(latest_path):
+        latest = int(os.readlink(latest_path))
+        os.remove(latest_path)
+        build_number = latest+1
+    else:
+        try:
+            os.makedirs(os.path.join(CACHE_DIR, srpm))
+        except:
+            pass
+        build_number = 1
+
+    os.symlink("%d" % build_number,latest_path)
+    print "Creating: %s" % (os.path.join(CACHE_DIR, srpm, "%d" % build_number))
+    os.symlink(cache_dir, os.path.join(CACHE_DIR, srpm, "%d" % build_number))
+    return build_number
+
 if __name__ == "__main__":
     if not os.path.isdir(SRPMS_DIR) or not os.listdir(SRPMS_DIR):
         print ("Error: No srpms found in %s; First run configure.py." %
@@ -174,6 +234,7 @@ if __name__ == "__main__":
     srpm_infos = map(get_srpm_info, packages)
     deps = get_deps(srpm_infos)
     order = toposort2(deps)
+    external = "external dependencies hash"
 
     for path in (TMP_RPM_PATH, BUILD_DIR, RPMS_DIR):
         if os.path.exists(path):
@@ -184,26 +245,49 @@ if __name__ == "__main__":
     for batch in order:
         for srpm in batch:
             target = extract_target(srpm_infos, srpm)
-            print "Building %s" % srpm
-            cmd = ["rpmbuild", "--rebuild", "-v", "%s" % srpm,
-                   "--target", target, "--define", "_rpmdir %s" % TMP_RPM_PATH]
-            (rc, stdout, stderr) = doexec(cmd)
-            if rc == 0:
-                print "Success"
+            cache_dir = get_cache_dir(srpm_infos, external, deps, srpm)
+            if(need_to_build(srpm_infos, external, deps, srpm)):
+                build_number = get_new_number(srpm,cache_dir)
+                print "Building %s - build number: %d" % (srpm, build_number)
+                cmd = ["rpmbuild", "--rebuild", "-v", "%s" % srpm,
+                       "--target", target, "--define", "_rpmdir %s" % TMP_RPM_PATH,
+                       "--define", "extrarelease .%d" % build_number
+                ]
+                (rc, stdout, stderr) = doexec(cmd)
+
+                if rc == 0:
+                    print "Success"
+                else:
+                    print "Failed to build rpm from srpm: %s" % srpm
+                    print "\nstdout\n======\n%s" % stdout
+                    print "\nstderr\n======\n%s" % stderr
+                    sys.exit(1)
+
                 rpms = glob.glob(os.path.join(TMP_RPM_PATH, target, "*"))
-                (rc, stdout, stderr) = doexec(["rpm", "-U", "--force",
-                "--nodeps"] + rpms)
-                if rc != 0:
-                    print "Ignoring failure installing rpm batch: %s" % rpms
-                    print stderr
-                dst_dir = os.path.join(RPMS_DIR, target)
-                if not os.path.exists(dst_dir):
-                    os.makedirs(dst_dir)
+                os.makedirs(cache_dir)
                 for bin_rpm in rpms:
-                    shutil.copy(bin_rpm, dst_dir)
-                    os.unlink(bin_rpm)
+                    print "Copying RPM %s to %s\n" % (bin_rpm, cache_dir)
+                    shutil.copy(bin_rpm, cache_dir)                
             else:
-                print "Failed to build rpm from srpm: %s" % srpm
-                print "\nstdout\n======\n%s" % stdout
-                print "\nstderr\n======\n%s" % stderr
-                sys.exit(1)
+                print "Not building %s - getting from cache" % srpm
+                rpms = glob.glob(os.path.join(cache_dir, "*.rpm"))
+
+            install_required = False
+            for othersrpm,itsdeps in deps.items():
+                if srpm in itsdeps:
+                    install_required = True
+
+            if install_required:
+                (rc, stdout, stderr) = doexec(["rpm", "-U"] + rpms)
+                if rc != 0:
+                    print "Failuring installing one of the rpms: %s" % rpms
+                    print stderr
+                    sys.exit(1)
+
+            dst_dir = os.path.join(RPMS_DIR, target)
+            if not os.path.exists(dst_dir):
+                os.makedirs(dst_dir)
+            for bin_rpm in rpms:
+                shutil.copy(bin_rpm, dst_dir)
+                os.unlink(bin_rpm)
+                
