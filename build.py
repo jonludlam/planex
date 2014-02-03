@@ -19,7 +19,8 @@ from planex_globals import (BUILD_ROOT_DIR, SRPMS_DIR, RPMS_DIR, BUILD_DIR,
 
 TMP_RPM_PATH = "/tmp/RPMS"
 RPM_TOP_DIR = os.path.join(os.getcwd(), BUILD_ROOT_DIR)
-CACHE_DIR = "rpmcache"
+CACHE_DIR = "/home/jludlam/rpmcache"
+DRY_RUN = False
 
 class RpmError(Exception):
     pass
@@ -57,12 +58,20 @@ def get_srpm_info_native(srpm):
     spec = rpm.ts().parseSpec(myspecfile)
     info = {}
     info['deps'] = spec.sourceHeader["requires"]
-    info['arch'] = "i686"
+    info['arches'] = ["i686"]
     info['packages'] = [{'name':p.header['name']} for p in spec.packages]
     info['srcrpm'] = srpm
     content_file = open(myspecfile,'r')
     info['spec'] = content_file.read()
     content_file.close()
+    xen_pkgs = [ x for x in info['packages'] if x['name']=='xen' ]
+    if len(xen_pkgs) > 0:
+	info['deps'].append('x86_64-linux-gcc')
+	info['deps'].append('x86_64-linux-libgcc')
+	info['deps'].append('x86_64-linux-binutils')
+    openssl_pkgs = [ x for x in info['packages'] if x['name']=="openssl" ]
+    if len(openssl_pkgs) > 0:
+	info['arches'] = ["i386","i686"]
     return info
 
 def get_srpm_info_srpmutil(srpm):
@@ -110,7 +119,7 @@ def get_srpm_info_srpmutil(srpm):
             lambda x: len(x) and x != "rpmlib(CompressedFileNames)",
             alldeps)
         j['deps'] = realdeps
-        j['arch'] = arch
+        j['arches'] = [arch]
         content_file = open(myspecfile,'r')
         j['spec'] = content_file.read()
         content_file.close()
@@ -120,18 +129,18 @@ def get_srpm_info_srpmutil(srpm):
         return {'broken': True, 'srcrpm': srpm}
 
 def get_srpm_info(srpm):
-    try:
-        return get_srpm_info_native(srpm)
-    except:
-        return get_srpm_info_srpmutil(srpm)
+    #try:
+    return get_srpm_info_native(srpm)
+    #except:
+    #    return get_srpm_info_srpmutil(srpm)
 
-def extract_target(srpm_infos, srpm_filename):
+def extract_targets(srpm_infos, srpm_filename):
     """
-    Given a list of srpm_info and an srpm filename, return the target arch
+    Given a list of srpm_info and an srpm filename, return the target arches
     """
     for srpm_info in srpm_infos:
         if srpm_info["srcrpm"] == srpm_filename:
-            return srpm_info["arch"]
+            return srpm_info["arches"]
 
 
 def get_package_to_srpm_map(srpm_info):
@@ -295,63 +304,68 @@ if __name__ == "__main__":
 
     for batch in order:
         for srpm in batch:
-            target = extract_target(srpm_infos, srpm)
+            targets = extract_targets(srpm_infos, srpm)
             cache_dir = get_cache_dir(srpm_infos, external, deps, srpm)
             if(need_to_build(srpm_infos, external, deps, srpm)):
-                build_number = get_new_number(srpm,cache_dir)
-                print "Building %s - build number: %d" % (srpm, build_number)
-                if use_mock:
-                    cmd = ["mock", "--configdir=mock", "-r", "xenserver",
-                           "--resultdir=%s" % TMP_RPM_PATH, "--rebuild",
-                           "--target", target,
-                           "--enable-plugin=tmpfs",
-                           "--define", "extrarelease .%d" % build_number,
-                           "-v", srpm]
-                    if not xs_build_sys:
-                        cmd = ["sudo"] + cmd + ["--disable-plugin=package_state"]
+                if DRY_RUN:
+                    print "Need to build %s" % srpm
                 else:
-                    cmd = ["rpmbuild", "--rebuild", "-v", "%s" % srpm,
-                           "--target", target, "--define",
-                           "_build_name_fmt %%{NAME}-%%{VERSION}-%%{RELEASE}.%%{ARCH}.rpm"]
+			for target in targets:
+			    build_number = get_new_number(srpm,cache_dir)
+			    print "Building %s - build number: %d" % (srpm, build_number)
+			    createrepo()
+			    if use_mock:
+				cmd = ["mock", "--configdir=mock", "-r", "xenserver",
+				       "--resultdir=%s" % TMP_RPM_PATH, "--rebuild",
+				       "--target", target,
+				       "--enable-plugin=tmpfs",
+				       "--define", "extrarelease .%d" % build_number,
+				       "-v", srpm]
+				if not xs_build_sys:
+				    cmd = ["sudo"] + cmd + ["--disable-plugin=package_state"]
+			    else:
+				cmd = ["rpmbuild", "--rebuild", "-v", "%s" % srpm,
+				       "--target", target, "--define",
+				       "_build_name_fmt %%{NAME}-%%{VERSION}-%%{RELEASE}.%%{ARCH}.rpm"]
 
-                (rc, stdout, stderr) = doexec(cmd)
+			    (rc, stdout, stderr) = doexec(cmd)
 
-                if rc == 0:
-                    print "Success"
-                else:
-                    print "Failed to build rpm from srpm: %s" % srpm
-                    print "\nstdout\n======\n%s" % stdout
-                    print "\nstderr\n======\n%s" % stderr
-                    sys.exit(1)
+			    if rc == 0:
+				print "Success"
+			    else:
+				print "Failed to build rpm from srpm: %s" % srpm
+				print "\nstdout\n======\n%s" % stdout
+				print "\nstderr\n======\n%s" % stderr
+				sys.exit(1)
 
-                files = glob.glob(os.path.join(TMP_RPM_PATH, "*"))
-                if cache_dir:
-                    os.makedirs(cache_dir)
-                    for f in files:
-                        print "Copying output file %s to %s\n" % (f, cache_dir)
-                        shutil.copy(f, cache_dir)
+			files = glob.glob(os.path.join(TMP_RPM_PATH, "*"))
+			if cache_dir:
+			    os.makedirs(cache_dir)
+			    for f in files:
+				print "Copying output file %s to %s\n" % (f, cache_dir)
+				shutil.copy(f, cache_dir)
 
-                if not use_mock:
-                    rpms = glob.glob(os.path.join(TMP_RPM_PATH, "*.rpm"))
-                    (rc, stdout, stderr) = doexec(["rpm", "-U", "--force",
-                                                   "--nodeps"] + rpms)
-                    if rc != 0:
-                        print "Ignoring failure installing rpm batch: %s" % rpms
-                        print stderr
+			if not use_mock:
+			    rpms = glob.glob(os.path.join(TMP_RPM_PATH, "*.rpm"))
+			    (rc, stdout, stderr) = doexec(["rpm", "-U", "--force",
+							   "--nodeps"] + rpms)
+			    if rc != 0:
+				print "Ignoring failure installing rpm batch: %s" % rpms
+				print stderr
 
 
-                files = glob.glob(os.path.join(TMP_RPM_PATH, "*.rpm"))
-                for f in files:
-                    print "Copying output RPM %s to %s\n" % (f, RPMS_DIR)
-                    shutil.copy(f, RPMS_DIR)
-                    os.unlink(f)
+			files = glob.glob(os.path.join(TMP_RPM_PATH, "*.rpm"))
+			for f in files:
+			    print "Copying output RPM %s to %s\n" % (f, RPMS_DIR)
+			    shutil.copy(f, RPMS_DIR)
+			    os.unlink(f)
 
             else:
                 print "Not building %s - getting from cache" % srpm
                 rpms = glob.glob(os.path.join(cache_dir, "*.rpm"))
                 for f in rpms:
                     print "Copying cached rpm %s to %s" % (f, RPMS_DIR)
-                    shutil.copy(f, RPMS_DIR)
+                    os.symlink(f,"%s/%s" % (RPMS_DIR,os.path.basename(f)))
                 if not use_mock:
                     (rc, stdout, stderr) = doexec(["rpm", "-U", "--force",
                                                    "--nodeps"] + rpms)
@@ -360,6 +374,5 @@ if __name__ == "__main__":
                         print stderr
 
             print "Success"
-            createrepo()
 
 

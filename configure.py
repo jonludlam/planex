@@ -147,15 +147,20 @@ def latest_git_tag(url):
     
     cmd = ["git", "--git-dir=%s" % dotgitdir,
          "describe", "--tags"]
+    print "executing: ", cmd
     if committish:
         cmd.append(committish)
 
     description = subprocess.Popen(cmd,
         stdout=subprocess.PIPE).communicate()[0].strip()
+    print "result: %s" % description
     match = re.search("[^0-9]*", description)
     matchlen = len(match.group())
-    return description[matchlen:].replace('-', '+')
-
+    result=description[matchlen:].replace('-', '+')
+    if len(result)==0:
+	print "Error describing repo: %s" % dotgitdir
+	exit(1)
+    return result
 
 def fetch_git_source(url):
     """
