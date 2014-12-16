@@ -278,7 +278,7 @@ def dump_manifest():
 
 def sort_mockconfig(config):
     config_dir = config.config_dir
-    if not os.path.exists(MOCK_DIR):
+    if not os.path.exists(MOCK_DIR) and os.path.exists(os.path.join(config_dir,'mock')):
         print_col(bcolours.OKGREEN, "Creating mock configuration for current working directory")
 
         yum_config = load_mock_config(os.path.join(config_dir,'mock','default.cfg'))
