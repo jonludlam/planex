@@ -19,15 +19,25 @@ from planex.util import setup_sigint_handler
 from planex.util import add_common_parser_options
 from planex.util import setup_logging
 
+def dotgitdir_of_path(repo):
+    """
+    Returns the path to the dotgitdir of the repository
+    """
+    if os.path.exists(os.path.join(repo, ".git")):
+        return os.path.join(repo, ".git")
+
+    # if it's a bare repo, it'll have a 'HEAD' file in it
+    if os.path.exists(repo+".git"):
+        return repo+".git"
+
+    raise Exception("Pin target is not a git repository: '%s'" % repo)
+
 
 def describe(repo, treeish="HEAD"):
     """
     Return an RPM compatible version string for a git repo at a given commit
     """
-    dotgitdir = os.path.join(repo, ".git")
-
-    if not os.path.exists(dotgitdir):
-        raise Exception("Pin target is not a git repository: '%s'" % repo)
+    dotgitdir = dotgitdir_of_path(repo)
 
     # First, get the hash of the commit
     cmd = ["git", "--git-dir=%s" % dotgitdir, "rev-parse", treeish]
@@ -54,7 +64,7 @@ def archive(repo, commit_hash, prefix, target_dir):
     Archive a git repo at a given commit with a specified version prefix.
     Returns the path to a tar.gz to be used as a source for building an RPM.
     """
-    dotgitdir = os.path.join(repo, ".git")
+    dotgitdir = dotgitdir_of_path(repo)
 
     prefix = "%s-%s" % (os.path.basename(repo), prefix)
     path = os.path.join(target_dir, "%s.tar" % prefix)
